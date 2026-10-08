@@ -238,7 +238,7 @@ $tabs = new CAdminTabControl(AILAB_TABS, [
                                 <textarea name="<?= $p ?>[columns]" rows="8" class="ailab-mono" style="width:100%;min-width:320px"
                                     placeholder="код | тип | источник | описание&#10;project | id | Проекты | проект строки&#10;amount | число | | сумма в тенге"><?= View::e($r['columns'] ?? '') ?></textarea>
                                 <div class="ailab-hint">Колонка на строку: <b>код | тип | источник | описание</b>.
-                                    Тип: строка, число, дата, id; звёздочка (<b>id*</b>, <b>число*</b>) — обязательная колонка, null модели запрещён. Для «id» — заголовок источника с ID; модель вернёт
+                                    Тип: строка, число, дата, id; звёздочка (<b>id*</b>, <b>число*</b>) — обязательная колонка, null модели запрещён; <b>id*=код_поля</b> — пустые ячейки заполнятся ID из этого поля ответа. Для «id» — заголовок источника с ID; модель вернёт
                                     {"id", "title"}, чужой ID превратится в null с сохранением названия.</div>
                             </div>
                             <div class="ailab-of-extra" data-types="ref_list table">

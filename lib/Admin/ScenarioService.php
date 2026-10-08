@@ -227,7 +227,7 @@ final class ScenarioService
             ]);
 
             if ($type === 'table') {
-                $field['columns'] = self::parseColumns((string)($row['columns'] ?? ''), $refSources, $code, $errors);
+                $field['columns'] = self::parseColumns((string)($row['columns'] ?? ''), $refSources, $code, $errors, array_column($prepared, 'code'));
                 if (!$field['columns']) {
                     $errors[] = "Поле ответа «{$code}»: опишите колонки таблицы, по одной в строке.";
                 }
@@ -263,7 +263,7 @@ final class ScenarioService
      * Колонки таблицы из текста: «код | тип | источник | описание», по одной в строке.
      * Источник — заголовок источника с ID (или #ID), нужен только для типа «id».
      */
-    public static function parseColumns(string $text, array $refSources, string $fieldCode, array &$errors): array
+    public static function parseColumns(string $text, array $refSources, string $fieldCode, array &$errors, array $fieldCodes = []): array
     {
         $byTitle = [];
         foreach ($refSources as $sid => $title) {
@@ -279,6 +279,12 @@ final class ScenarioService
             $parts = array_map('trim', explode('|', $line));
             $code = $parts[0] ?? '';
             $typeRaw = mb_strtolower($parts[1] ?? 'string');
+            $defaultField = '';
+            if (str_contains($typeRaw, '=')) {              // «id*=article_project_id» — по умолчанию поле ответа
+                [$typeRaw, $defaultField] = array_map('trim', explode('=', $typeRaw, 2));
+            }
+            $required = str_ends_with($typeRaw, '*');      // «id*», «число*» — обязательная колонка
+            $typeRaw = rtrim($typeRaw, '* ');
             $sourceRaw = $parts[2] ?? '';
             $description = trim(implode(' | ', array_slice($parts, 3)));
             $where = "Поле ответа «{$fieldCode}», колонка «{$code}»";
@@ -305,7 +311,17 @@ final class ScenarioService
                     continue;
                 }
             }
-            $columns[] = ['code' => $code, 'type' => $type, 'source_id' => $sourceId, 'description' => $description];
+            if ($defaultField !== '') {
+                if ($type !== 'ref') {
+                    $errors[] = "{$where}: «=поле» по умолчанию можно только у колонки типа id.";
+                    continue;
+                }
+                if ($fieldCodes && !in_array($defaultField, $fieldCodes, true)) {
+                    $errors[] = "{$where}: поля ответа «{$defaultField}» нет — укажите код существующего поля.";
+                    continue;
+                }
+            }
+            $columns[] = ['code' => $code, 'type' => $type, 'source_id' => $sourceId, 'description' => $description, 'required' => $required, 'default_field' => $defaultField];
         }
         return OutputSchema::normalizeColumns($columns);
     }
@@ -316,7 +332,9 @@ final class ScenarioService
         $lines = [];
         foreach ($columns as $c) {
             $source = $c['type'] === 'ref' ? ($sourceTitles[$c['source_id']] ?? ('#' . $c['source_id'])) : '';
-            $lines[] = rtrim($c['code'] . ' | ' . ($names[$c['type']] ?? $c['type']) . ' | ' . $source . ' | ' . $c['description'], ' |');
+            $type = ($names[$c['type']] ?? $c['type']) . (!empty($c['required']) ? '*' : '')
+                . (($c['default_field'] ?? '') !== '' ? '=' . $c['default_field'] : '');
+            $lines[] = rtrim($c['code'] . ' | ' . $type . ' | ' . $source . ' | ' . $c['description'], ' |');
         }
         return implode("\n", $lines);
     }

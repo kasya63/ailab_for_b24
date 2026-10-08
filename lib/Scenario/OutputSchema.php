@@ -86,7 +86,7 @@ final class OutputSchema
         ];
     }
 
-    /** @return list<array{code: string, type: string, source_id: int, description: string}> */
+    /** @return list<array{code: string, type: string, source_id: int, description: string, required: bool, default_field: string}> */
     public static function normalizeColumns(mixed $columns): array
     {
         $out = [];
@@ -106,6 +106,8 @@ final class OutputSchema
                 'type'        => $type,
                 'source_id'   => $type === 'ref' ? (int)($c['source_id'] ?? 0) : 0,
                 'description' => trim((string)($c['description'] ?? '')),
+                'required'    => !empty($c['required']),
+                'default_field' => $type === 'ref' ? trim((string)($c['default_field'] ?? '')) : '',
             ];
         }
         return $out;
@@ -210,7 +212,41 @@ final class OutputSchema
             $clean[$code] = $converted;
         }
 
+        $this->applyTableDefaults($clean, $refSets, $warnings);
+
         return new ValidationResult($errors === [], $clean, $errors, $warnings);
+    }
+
+    /** Пустые ref-ячейки таблиц → значение другого поля ответа (колонка «id=код_поля») */
+    private function applyTableDefaults(array &$clean, array $refSets, array &$warnings): void
+    {
+        foreach ($this->fields as $f) {
+            if ($f['type'] !== 'table' || !is_array($clean[$f['code']] ?? null)) {
+                continue;
+            }
+            foreach ($f['columns'] as $col) {
+                $from = $col['default_field'] ?? '';
+                if ($from === '') {
+                    continue;
+                }
+                $def = $clean[$from] ?? null;
+                $def = is_int($def) ? $def : (is_array($def) && count($def) === 1 ? (int)reset($def) : 0);
+                if ($def <= 0 || !isset($refSets[$col['source_id']][$def])) {
+                    $warnings[] = "Поле «{$f['code']}», колонка «{$col['code']}»: значение по умолчанию из «{$from}» не задано или не из источника — пустые ячейки остались пустыми";
+                    continue;
+                }
+                $filled = 0;
+                foreach ($clean[$f['code']] as $i => $row) {
+                    if (($row[$col['code']] ?? null) === null) {
+                        $clean[$f['code']][$i][$col['code']] = ['id' => $def, 'title' => ''];
+                        $filled++;
+                    }
+                }
+                if ($filled) {
+                    $warnings[] = "Поле «{$f['code']}», колонка «{$col['code']}»: в {$filled} строк подставлено значение «{$from}» = {$def}";
+                }
+            }
+        }
     }
 
     /** @return array{0: bool, 1: mixed, 2: string} */
@@ -335,6 +371,9 @@ final class OutputSchema
                 if ($warn !== '') {
                     $warnings[] = "Поле «{$f['code']}», строка {$n}, «{$col['code']}»: {$warn}";
                 }
+                if ($cell === null && !empty($col['required']) && $warn === '' && ($col['default_field'] ?? '') === '') {
+                    $warnings[] = "Поле «{$f['code']}», строка {$n}: обязательная колонка «{$col['code']}» пустая";
+                }
                 $clean[$col['code']] = $cell;
                 $filled = $filled || $cell !== null;
             }
@@ -411,13 +450,11 @@ final class OutputSchema
                     $id = null;
                 }
                 if ($id !== null && !isset($refSets[$col['source_id']][$id])) {
-                    $warn = "ID {$id} нет среди переданных модели — оставлено только название";
-                    $id = null;
-                }
-                if ($id === null && $title === '') {
+                    $warn = "ID {$id} нет среди переданных модели — ячейка очищена";
                     return null;
                 }
-                return ['id' => $id, 'title' => $title];
+                // без ID ячейка пустая: название без ID для 1С бесполезно (бывает и мусор вроде «article_project_id»)
+                return $id === null ? null : ['id' => $id, 'title' => $title];
         }
         return null;
     }
@@ -454,15 +491,20 @@ final class OutputSchema
     {
         $parts = [];
         foreach ($f['columns'] as $col) {
+            $req = !empty($col['required']);
+            $source = $sourceTitles[$col['source_id']] ?? ('источник #' . $col['source_id']);
             $what = match ($col['type']) {
                 'string' => 'строка',
                 'number' => 'число',
                 'date'   => 'дата ДД.ММ.ГГГГ',
-                'ref'    => 'объект {"id": ID строки из раздела «'
-                    . ($sourceTitles[$col['source_id']] ?? ('источник #' . $col['source_id']))
-                    . '» или null, если подходящей строки нет; "title": название}',
+                'ref'    => $req
+                    ? 'объект {"id": ID строки из раздела «' . $source . '» — ОБЯЗАТЕЛЬНО, null нельзя; "title": название}'
+                    : 'объект {"id": ID строки из раздела «' . $source . '» или null, если подходящей строки нет; "title": название}',
             };
-            $line = '"' . $col['code'] . '" — ' . $what . ' или null';
+            $line = '"' . $col['code'] . '" — ' . $what . ($req ? ' (обязательно)' : ' или null');
+            if (($col['default_field'] ?? '') !== '') {
+                $line .= ' [если не определил — ID из поля «' . $col['default_field'] . '»]';
+            }
             if ($col['description'] !== '') {
                 $line .= ' (' . $col['description'] . ')';
             }
@@ -491,13 +533,14 @@ final class OutputSchema
     {
         $props = [];
         foreach ($columns as $col) {
+            $req = !empty($col['required']);
             $props[$col['code']] = match ($col['type']) {
-                'string', 'date' => ['type' => ['string', 'null']],
-                'number'         => ['type' => ['number', 'null']],
+                'string', 'date' => ['type' => $req ? 'string' : ['string', 'null']],
+                'number'         => ['type' => $req ? 'number' : ['number', 'null']],
                 'ref'            => [
                     'type'                 => 'object',
                     'properties'           => [
-                        'id'    => ['type' => ['integer', 'null']],
+                        'id'    => ['type' => $req ? 'integer' : ['integer', 'null']],
                         'title' => ['type' => 'string'],
                     ],
                     'required'             => ['id', 'title'],
