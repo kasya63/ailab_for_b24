@@ -33,6 +33,7 @@ final class ScenarioService
     public static function rowToForm(array $row): array
     {
         $rows = [];
+        $sourceTitles = self::refSourceOptions((int)($row['ID'] ?? 0));
         foreach (OutputSchema::fromJson($row['OUTPUT_FIELDS'])->fields() as $i => $f) {
             $rows[] = [
                 'sort'        => (string)(($i + 1) * 10),
@@ -44,6 +45,7 @@ final class ScenarioService
                 'source_id'   => (string)$f['source_id'],
                 'allow_zero'  => $f['allow_zero'] ? 'Y' : '',
                 'max_items'   => $f['max_items'] ? (string)$f['max_items'] : '',
+                'columns'     => self::columnsToText($f['columns'] ?? [], $sourceTitles),
             ];
         }
         return [
@@ -224,6 +226,12 @@ final class ScenarioService
                 'max_items'   => (int)($row['max_items'] ?? 0),
             ]);
 
+            if ($type === 'table') {
+                $field['columns'] = self::parseColumns((string)($row['columns'] ?? ''), $refSources, $code, $errors);
+                if (!$field['columns']) {
+                    $errors[] = "Поле ответа «{$code}»: опишите колонки таблицы, по одной в строке.";
+                }
+            }
             if ($type === 'enum' && !$field['enum']) {
                 $errors[] = "Поле ответа «{$code}»: перечислите варианты, по одному в строке.";
             }
@@ -235,9 +243,82 @@ final class ScenarioService
             if (!in_array($type, ['ref', 'ref_list'], true)) {
                 $field['source_id'] = 0;
             }
+            if (!in_array($type, ['ref_list', 'table'], true)) {
+                $field['max_items'] = 0;
+            }
             $fields[] = $field;
         }
         return $fields;
+    }
+
+    /** Синонимы типов колонок в текстовом описании. */
+    private const COLUMN_TYPE_ALIASES = [
+        'string' => 'string', 'строка' => 'string', 'текст' => 'string',
+        'number' => 'number', 'число' => 'number', 'сумма' => 'number',
+        'date'   => 'date',   'дата' => 'date',
+        'ref'    => 'ref',    'id' => 'ref', 'ид' => 'ref', 'ссылка' => 'ref',
+    ];
+
+    /**
+     * Колонки таблицы из текста: «код | тип | источник | описание», по одной в строке.
+     * Источник — заголовок источника с ID (или #ID), нужен только для типа «id».
+     */
+    public static function parseColumns(string $text, array $refSources, string $fieldCode, array &$errors): array
+    {
+        $byTitle = [];
+        foreach ($refSources as $sid => $title) {
+            $byTitle[mb_strtolower(trim($title))] = (int)$sid;
+        }
+
+        $columns = [];
+        foreach (preg_split('/\R/u', $text) ?: [] as $lineNo => $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+            $parts = array_map('trim', explode('|', $line));
+            $code = $parts[0] ?? '';
+            $typeRaw = mb_strtolower($parts[1] ?? 'string');
+            $sourceRaw = $parts[2] ?? '';
+            $description = trim(implode(' | ', array_slice($parts, 3)));
+            $where = "Поле ответа «{$fieldCode}», колонка «{$code}»";
+
+            if (!preg_match('/^[a-z][a-z0-9_]{0,39}$/', $code)) {
+                $errors[] = "Поле ответа «{$fieldCode}», строка " . ($lineNo + 1) . ': код колонки — латиница в нижнем регистре, цифры и «_».';
+                continue;
+            }
+            $type = self::COLUMN_TYPE_ALIASES[$typeRaw] ?? null;
+            if ($type === null) {
+                $errors[] = "{$where}: тип «{$typeRaw}» не знаю — строка, число, дата или id.";
+                continue;
+            }
+            $sourceId = 0;
+            if ($type === 'ref') {
+                if (preg_match('/^#?(\d+)$/', $sourceRaw, $m) && isset($refSources[(int)$m[1]])) {
+                    $sourceId = (int)$m[1];
+                } else {
+                    $sourceId = $byTitle[mb_strtolower($sourceRaw)] ?? 0;
+                }
+                if ($sourceId === 0) {
+                    $errors[] = "{$where}: источник «{$sourceRaw}» не найден среди источников с ID ("
+                        . ($refSources ? implode(', ', $refSources) : 'их пока нет') . ').';
+                    continue;
+                }
+            }
+            $columns[] = ['code' => $code, 'type' => $type, 'source_id' => $sourceId, 'description' => $description];
+        }
+        return OutputSchema::normalizeColumns($columns);
+    }
+
+    public static function columnsToText(array $columns, array $sourceTitles): string
+    {
+        $names = ['string' => 'строка', 'number' => 'число', 'date' => 'дата', 'ref' => 'id'];
+        $lines = [];
+        foreach ($columns as $c) {
+            $source = $c['type'] === 'ref' ? ($sourceTitles[$c['source_id']] ?? ('#' . $c['source_id'])) : '';
+            $lines[] = rtrim($c['code'] . ' | ' . ($names[$c['type']] ?? $c['type']) . ' | ' . $source . ' | ' . $c['description'], ' |');
+        }
+        return implode("\n", $lines);
     }
 
     private static function intInRange(mixed $raw, int $default, int $min, int $max): int

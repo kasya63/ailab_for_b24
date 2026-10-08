@@ -22,6 +22,15 @@ final class OutputSchema
         'enum'     => 'Один из вариантов',
         'ref'      => 'ID из источника',
         'ref_list' => 'Список ID из источника',
+        'table'    => 'Таблица (строки с колонками)',
+    ];
+
+    /** Типы колонок таблицы. */
+    public const COLUMN_TYPES = [
+        'string' => 'строка',
+        'number' => 'число',
+        'date'   => 'дата',
+        'ref'    => 'ID из источника',
     ];
 
     /** Служебные результаты кубика, их нельзя занимать. */
@@ -73,7 +82,33 @@ final class OutputSchema
             'source_id'   => (int)($f['source_id'] ?? 0),
             'allow_zero'  => (bool)($f['allow_zero'] ?? false),
             'max_items'   => max(0, (int)($f['max_items'] ?? 0)),
+            'columns'     => $type === 'table' ? self::normalizeColumns($f['columns'] ?? []) : [],
         ];
+    }
+
+    /** @return list<array{code: string, type: string, source_id: int, description: string}> */
+    public static function normalizeColumns(mixed $columns): array
+    {
+        $out = [];
+        $seen = [];
+        foreach ((array)$columns as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $code = trim((string)($c['code'] ?? ''));
+            $type = (string)($c['type'] ?? 'string');
+            if ($code === '' || isset($seen[$code]) || !isset(self::COLUMN_TYPES[$type])) {
+                continue;
+            }
+            $seen[$code] = true;
+            $out[] = [
+                'code'        => $code,
+                'type'        => $type,
+                'source_id'   => $type === 'ref' ? (int)($c['source_id'] ?? 0) : 0,
+                'description' => trim((string)($c['description'] ?? '')),
+            ];
+        }
+        return $out;
     }
 
     /** @return list<array> */
@@ -124,6 +159,7 @@ final class OutputSchema
                     . ($f['allow_zero'] ? '; 0 — если ничего не подходит' : ''),
                 'ref_list' => 'массив целых чисел — ID строк из раздела «' . $source . '»'
                     . ($f['max_items'] > 0 ? ', не больше ' . $f['max_items'] : ''),
+                'table'    => self::tableText($f, $sourceTitles),
             };
             $line = sprintf('- "%s": %s.', $f['code'], $what);
             if (!$f['required']) {
@@ -260,8 +296,181 @@ final class OutputSchema
                     $ids = array_slice($ids, 0, $f['max_items']);
                 }
                 return [true, $ids, ''];
+
+            case 'table':
+                return $this->checkTable($f, $value, $refSets, $warnings);
         }
         return [false, null, 'неизвестный тип'];
+    }
+
+    /** @return array{0: bool, 1: mixed, 2: string} */
+    private function checkTable(array $f, mixed $value, array $refSets, array &$warnings): array
+    {
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            if (!is_array($decoded)) {
+                return [false, null, 'ожидался массив строк таблицы'];
+            }
+            $value = $decoded;
+        }
+        if (is_array($value) && isset($value['rows']) && is_array($value['rows'])) {
+            $value = $value['rows'];
+        }
+        if (!is_array($value) || !array_is_list($value)) {
+            return [false, null, 'ожидался массив строк таблицы'];
+        }
+
+        $rows = [];
+        foreach ($value as $i => $row) {
+            $n = $i + 1;
+            if (!is_array($row)) {
+                $warnings[] = "Поле «{$f['code']}», строка {$n}: не объект — пропущена";
+                continue;
+            }
+            $clean = [];
+            $filled = false;
+            foreach ($f['columns'] as $col) {
+                $warn = '';
+                $cell = self::tableCell($col, $row[$col['code']] ?? null, $refSets, $warn);
+                if ($warn !== '') {
+                    $warnings[] = "Поле «{$f['code']}», строка {$n}, «{$col['code']}»: {$warn}";
+                }
+                $clean[$col['code']] = $cell;
+                $filled = $filled || $cell !== null;
+            }
+            if ($filled) {
+                $rows[] = $clean;
+            }
+        }
+
+        if ($f['max_items'] > 0 && count($rows) > $f['max_items']) {
+            $warnings[] = "Поле «{$f['code']}»: оставлены первые {$f['max_items']} строк из " . count($rows);
+            $rows = array_slice($rows, 0, $f['max_items']);
+        }
+        return [true, $rows, ''];
+    }
+
+    /**
+     * Ячейка таблицы. Ошибки ячейки не валят ответ целиком: ячейка становится пустой
+     * (для ID — остаётся только название), а в предупреждения пишется причина.
+     */
+    private static function tableCell(array $col, mixed $raw, array $refSets, string &$warn): mixed
+    {
+        if ($raw === null || $raw === '') {
+            return null;
+        }
+
+        switch ($col['type']) {
+            case 'string':
+                if (!is_scalar($raw)) {
+                    $warn = 'ожидалась строка';
+                    return null;
+                }
+                $s = trim((string)$raw);
+                return $s === '' ? null : $s;
+
+            case 'number':
+                if (is_int($raw) || is_float($raw)) {
+                    return $raw;
+                }
+                $s = is_scalar($raw) ? self::numericString((string)$raw) : null;
+                if ($s !== null) {
+                    return (float)$s;
+                }
+                $warn = 'не число: ' . Json::encode($raw);
+                return null;
+
+            case 'date':
+                $s = is_scalar($raw) ? trim((string)$raw) : '';
+                if (preg_match('/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/', $s, $m)) {
+                    [$d, $mo, $y] = [(int)$m[1], (int)$m[2], (int)$m[3]];
+                } elseif (preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $s, $m)) {
+                    [$y, $mo, $d] = [(int)$m[1], (int)$m[2], (int)$m[3]];
+                } else {
+                    $warn = 'не дата: ' . Json::encode($raw);
+                    return null;
+                }
+                if (!checkdate($mo, $d, $y)) {
+                    $warn = 'несуществующая дата: ' . $s;
+                    return null;
+                }
+                return sprintf('%02d.%02d.%04d', $d, $mo, $y);
+
+            case 'ref':
+                $id = null;
+                $title = '';
+                if (is_array($raw)) {
+                    $id = self::toInt($raw['id'] ?? null);
+                    $title = is_scalar($raw['title'] ?? null) ? trim((string)$raw['title']) : '';
+                } elseif (is_int($raw)) {
+                    $id = $raw;
+                } elseif (is_scalar($raw)) {
+                    $title = trim((string)$raw);
+                }
+                if ($id !== null && $id <= 0) {
+                    $id = null;
+                }
+                if ($id !== null && !isset($refSets[$col['source_id']][$id])) {
+                    $warn = "ID {$id} нет среди переданных модели — оставлено только название";
+                    $id = null;
+                }
+                if ($id === null && $title === '') {
+                    return null;
+                }
+                return ['id' => $id, 'title' => $title];
+        }
+        return null;
+    }
+
+    /**
+     * «12,300» / «₸61,500» / «1 234 567,89» / «1,234,567.89» → «12300» / «61500» / «1234567.89».
+     * Разделитель, за которым до конца ровно 3 цифры, — тысячи; иначе — дробная часть.
+     */
+    public static function numericString(string $raw): ?string
+    {
+        $s = str_replace(["\u{00A0}", "\u{202F}", ' ', "'", '₸', 'KZT', 'тг'], '', trim($raw));
+        if ($s === '') {
+            return null;
+        }
+        $lastComma = strrpos($s, ',');
+        $lastDot = strrpos($s, '.');
+        if ($lastComma !== false && $lastDot !== false) {
+            $decimal = $lastComma > $lastDot ? ',' : '.';
+            $thousand = $decimal === ',' ? '.' : ',';
+            $s = str_replace($thousand, '', $s);
+            $s = str_replace($decimal, '.', $s);
+        } elseif ($lastComma !== false || $lastDot !== false) {
+            $sep = $lastComma !== false ? ',' : '.';
+            if (preg_match('/^-?\d{1,3}(' . preg_quote($sep, '/') . '\d{3})+$/', $s)) {
+                $s = str_replace($sep, '', $s);
+            } else {
+                $s = str_replace(',', '.', $s);
+            }
+        }
+        return is_numeric($s) ? $s : null;
+    }
+
+    private static function tableText(array $f, array $sourceTitles): string
+    {
+        $parts = [];
+        foreach ($f['columns'] as $col) {
+            $what = match ($col['type']) {
+                'string' => 'строка',
+                'number' => 'число',
+                'date'   => 'дата ДД.ММ.ГГГГ',
+                'ref'    => 'объект {"id": ID строки из раздела «'
+                    . ($sourceTitles[$col['source_id']] ?? ('источник #' . $col['source_id']))
+                    . '» или null, если подходящей строки нет; "title": название}',
+            };
+            $line = '"' . $col['code'] . '" — ' . $what . ' или null';
+            if ($col['description'] !== '') {
+                $line .= ' (' . $col['description'] . ')';
+            }
+            $parts[] = $line;
+        }
+        return 'массив строк таблицы' . ($f['max_items'] > 0 ? ' (не больше ' . $f['max_items'] . ')' : '')
+            . '; каждая строка — объект с полями: ' . implode('; ', $parts)
+            . '. Пустой массив [] — если строк нет';
     }
 
     private static function toInt(mixed $value): ?int
@@ -278,6 +487,35 @@ final class OutputSchema
         return null;
     }
 
+    private static function rowSchema(array $columns): array
+    {
+        $props = [];
+        foreach ($columns as $col) {
+            $props[$col['code']] = match ($col['type']) {
+                'string', 'date' => ['type' => ['string', 'null']],
+                'number'         => ['type' => ['number', 'null']],
+                'ref'            => [
+                    'type'                 => 'object',
+                    'properties'           => [
+                        'id'    => ['type' => ['integer', 'null']],
+                        'title' => ['type' => 'string'],
+                    ],
+                    'required'             => ['id', 'title'],
+                    'additionalProperties' => false,
+                ],
+            };
+            if ($col['description'] !== '') {
+                $props[$col['code']]['description'] = $col['description'];
+            }
+        }
+        return [
+            'type'                 => 'object',
+            'properties'           => (object)$props,
+            'required'             => array_column($columns, 'code'),
+            'additionalProperties' => false,
+        ];
+    }
+
     private static function fieldSchema(array $f): array
     {
         $schema = match ($f['type']) {
@@ -287,6 +525,7 @@ final class OutputSchema
             'boolean'         => ['type' => 'boolean'],
             'enum'            => ['type' => 'string', 'enum' => $f['enum']],
             'ref_list'        => ['type' => 'array', 'items' => ['type' => 'integer']],
+            'table'           => ['type' => 'array', 'items' => self::rowSchema($f['columns'])],
         };
         if (!$f['required']) {
             $schema['type'] = [$schema['type'], 'null'];

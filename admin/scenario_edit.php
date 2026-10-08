@@ -234,8 +234,15 @@ $tabs = new CAdminTabControl(AILAB_TABS, [
                             <div class="ailab-of-extra" data-types="ref">
                                 <label><input type="checkbox" name="<?= $p ?>[allow_zero]" value="Y"<?= ($r['allow_zero'] ?? '') === 'Y' ? ' checked' : '' ?>> 0 — «ничего не подошло»</label>
                             </div>
-                            <div class="ailab-of-extra" data-types="ref_list">
-                                не больше <input type="text" name="<?= $p ?>[max_items]" value="<?= View::e($r['max_items'] ?? '') ?>" size="3"> шт.
+                            <div class="ailab-of-extra" data-types="table">
+                                <textarea name="<?= $p ?>[columns]" rows="8" class="ailab-mono" style="width:100%;min-width:320px"
+                                    placeholder="код | тип | источник | описание&#10;project | id | Проекты | проект строки&#10;amount | число | | сумма в тенге"><?= View::e($r['columns'] ?? '') ?></textarea>
+                                <div class="ailab-hint">Колонка на строку: <b>код | тип | источник | описание</b>.
+                                    Тип: строка, число, дата, id. Для «id» — заголовок источника с ID; модель вернёт
+                                    {"id", "title"}, чужой ID превратится в null с сохранением названия.</div>
+                            </div>
+                            <div class="ailab-of-extra" data-types="ref_list table">
+                                не больше <input type="text" name="<?= $p ?>[max_items]" value="<?= View::e($r['max_items'] ?? '') ?>" size="3"> <span class="ailab-of-extra" data-types="ref_list">шт.</span><span class="ailab-of-extra" data-types="table">строк (пусто — без ограничения)</span>
                             </div>
                         </td>
                         <td><?php if (empty($r['blank'])): ?><input type="checkbox" name="<?= $p ?>[delete]" value="Y"><?php endif; ?></td>

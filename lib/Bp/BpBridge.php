@@ -37,6 +37,7 @@ final class BpBridge
         'ref_list' => 'int',
         'number'   => 'double',
         'boolean'  => 'bool',
+        'table'    => 'text',
     ];
 
     public static function notify(int $taskId): void
@@ -145,6 +146,7 @@ final class BpBridge
                 'integer', 'ref' => $v === null ? null : (int)$v,
                 'number'         => $v === null ? null : (float)$v,
                 'ref_list'       => array_values(array_map('intval', (array)$v)),
+                'table'          => is_array($v) ? Json::encode(['rows' => array_values($v)]) : '',
                 default          => $v === null ? '' : (string)$v,
             };
         }
@@ -165,7 +167,13 @@ final class BpBridge
     public static function summary(array $task, int $limit = 600): string
     {
         $parts = [];
+        $types = array_column(self::builtFields($task), 'type', 'code');
         foreach (self::resultValues($task) as $code => $value) {
+            if (($types[$code] ?? '') === 'table') {
+                $rows = $value !== '' ? count((array)(json_decode($value, true)['rows'] ?? [])) : 0;
+                $parts[] = $code . ': таблица, строк ' . $rows;
+                continue;
+            }
             if (is_array($value)) {
                 $value = $value ? implode(', ', $value) : '—';
             } elseif ($value === null || $value === '') {
